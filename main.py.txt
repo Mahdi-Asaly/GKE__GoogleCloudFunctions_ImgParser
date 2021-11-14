@@ -1,0 +1,100 @@
+
+
+def img_parser(event,context):
+    from google.cloud import vision
+    from google.cloud import storage
+    from wand.image import Image
+    ###########Parsing the Image############    
+    client = vision.ImageAnnotatorClient()
+    image = vision.Image()
+    PREFIX = "thumbnail"
+
+    bucket = event.get('bucket')
+    filename = event.get('name')
+     # Don't generate a thumbnail for a thumbnail
+    if event.get('name') is None or event.get('name').startswith(PREFIX):
+        return   
+    image_uri = 'gs://{}/{}'.format(bucket, filename)
+    image.source.image_uri = image_uri
+
+    print('now reading {}'.format(image_uri))
+
+
+    response = client.safe_search_detection(image=image)
+    safe = response.safe_search_annotation
+
+    likelihood_name = ('UNKNOWN', 'VERY_UNLIKELY', 'UNLIKELY', 'POSSIBLE',
+                       'LIKELY', 'VERY_LIKELY')
+                
+    print('Safe search:')
+    print('violence: {}'.format(likelihood_name[safe.violence]))
+
+    ##if there are any doubts about violation we don't save the details to the db.
+    contain_violation = False #by default there are no violation in the image.
+    if likelihood_name[safe.violence] == 'LIKELY' or likelihood_name[safe.violence] == 'VERY_LIKELY' or likelihood_name[safe.violence] == 'POSSIBLE':
+        contain_violation = True
+
+    ###########MONGODB############    
+    from pymongo import MongoClient
+    from pymongo.errors import ConnectionFailure
+    try:
+        # uri = "mongodb+srv://admin:admin123@imgparser.rqqfu.mongodb.net/myFirstDatabase?retryWrites=true&w=majority"
+        uri = "mongodb://104.199.103.195:27017" #the connection string from mongodb instance.
+        
+        connect = MongoClient(uri)
+        if connect:
+            print("MongoDB cluster is reachable")
+            print(connect)
+    except ConnectionFailure as e:
+        print("Could not connect to MongoDB")
+        print(e)
+
+    db = connect.myDb
+    collection = db.img_db
+
+    img_result = {
+        "name":(f"{PREFIX}-{event['name']}"),
+        "violation":contain_violation
+        }
+    #If there are no violation we should store the details on the DB.
+    if contain_violation == False and likelihood_name[safe.violence] != 'UNKNOWN':
+
+        #Firstable we insert to the db the collection result.
+        #collection.drop() #Delete colllections.
+        x = collection.insert_one(img_result)  
+        print('inserting doc')
+        print(x)
+        for y in collection.find({}):
+            print(y)
+
+
+        #Next we should move the file to the new bucket if it's already not includes violenece content.
+        storage_client = storage.Client()
+
+        # Get the bucket which the image has been uploaded to
+        bucket = storage_client.get_bucket(event['bucket'])
+        ##ThumpNail
+        # Download the image and resize it
+        thumbnail = Image(blob=bucket.get_blob(event['name']).download_as_string())
+        thumbnail.resize(100, 100)
+
+        # Upload the thumbnail with the filename prefix
+        thumbnail_blob = bucket.blob(f"{PREFIX}-{event['name']}")
+        thumbnail_blob.upload_from_string(thumbnail.make_blob())
+
+
+        source_bucket = storage_client.bucket(event.get('bucket'))
+        # source_blob = source_bucket.blob(event.get('name'))
+        # destination_bucket = storage_client.bucket("validimages")
+
+        # blob_copy = source_bucket.copy_blob(
+        #     source_blob, destination_bucket, event.get('name')
+        # )
+        source_bucket.delete_blob(event.get('name'))
+
+
+
+
+
+
+
